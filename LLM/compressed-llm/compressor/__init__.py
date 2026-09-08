@@ -5,6 +5,7 @@ producir ``K`` latents ``[B, K, D]`` desde ``N`` tokens ``[B, N, D]``.
 """
 from __future__ import annotations
 
+import torch
 import torch.nn as nn
 
 from compressed_llm.config import CompressorConfig
@@ -35,6 +36,10 @@ class Compressor(nn.Module):
             intermediate_size=cfg.hidden_size * 4,
             dropout=cfg.dropout,
         )
+        self.bottleneck_input_proj = (
+            nn.Linear(cfg.hidden_size, cfg.latent_dim, bias=False)
+            if cfg.hidden_size != cfg.latent_dim else nn.Identity()
+        )
         self.bottleneck = LatentBottleneck(
             latent_count=cfg.latent_count,
             dim=cfg.latent_dim,
@@ -46,5 +51,6 @@ class Compressor(nn.Module):
     def forward(self, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """hidden: [B, N, D]; mask: [B, N]. Returns latents [B, K, D]."""
         encoded = self.encoder(hidden, mask)
+        encoded = self.bottleneck_input_proj(encoded)
         latents = self.bottleneck(encoded, mask)
         return latents
