@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Entrenamiento / datos grandes
+data/*.arrow
+data/*.jsonl
+data/cache/
+results/checkpoints/
+results/plots/
+experiments/*/checkpoints/
+
+# PyTorch / HF
+lightning_logs/
+wandb/
+
+# Tests
+.pytest_cache/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

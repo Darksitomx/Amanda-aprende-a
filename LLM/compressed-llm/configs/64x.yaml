@@ -1,0 +1,21 @@
+# 64x compression (§14): 1024 tokens -> 16 latents
+name: 64x
+
+model:
+  hidden_size: 256
+  num_layers: 4
+  num_heads: 4
+  max_position_embeddings: 1024
+
+compressor:
+  encoder_layers: 2
+  hidden_size: 256
+  num_heads: 4
+  latent_count: 16
+  latent_dim: 256
+  cross_attention_layers: 2
+  local_window: 128
+
+training:
+  max_input_tokens: 1024
+  max_output_tokens: 256

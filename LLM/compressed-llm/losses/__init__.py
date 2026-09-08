@@ -1,0 +1,1 @@
+"""Pérdidas del proyecto."""

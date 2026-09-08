@@ -1,0 +1,33 @@
+# V0 - primera prueba de concepto (§15, §41)
+# Input: 256 tokens | Latents: 64 | Decoder ~10M | Español
+name: v0
+
+model:
+  hidden_size: 256
+  num_layers: 4
+  num_heads: 4
+  intermediate_size: 1024
+  max_position_embeddings: 512  # 256 contexto + margen para respuesta
+
+compressor:
+  encoder_layers: 2
+  hidden_size: 256
+  num_heads: 4
+  latent_count: 64
+  latent_dim: 256
+  cross_attention_layers: 2
+  local_window: 64
+
+training:
+  max_input_tokens: 256
+  max_output_tokens: 256
+  batch_size: 2
+  gradient_accumulation: 16
+  learning_rate: 3e-4
+  warmup_steps: 100
+  max_steps: 10000
+  mixed_precision: fp16
+
+loss:
+  preference_weight: 0.1
+  information_weight: 0.0
