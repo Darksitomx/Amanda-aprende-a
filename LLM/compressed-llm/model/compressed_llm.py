@@ -63,8 +63,14 @@ class CompressedLLM(nn.Module):
         logits = self.decoder(seq, seq_mask)
         result = {"logits": logits}
         if labels is not None:
+            # Causal LM:
+            # output_ids = [BOS, y0, y1, ...]
+            # labels     = [y0,  y1, y2, ... EOS]
+            # El logit en prefix_len + i ve el token de output_ids[i] y
+            # predice labels[i]. La posición prefix_len - 1 pertenece al
+            # último latent/context token y no debe usarse para la respuesta.
             L = labels.size(1)
-            resp_logits = logits[:, prefix_len - 1:prefix_len - 1 + L, :]
+            resp_logits = logits[:, prefix_len:prefix_len + L, :]
             if resp_logits.size(1) != L:
                 raise RuntimeError(f"Alineación inválida: {resp_logits.shape} vs {labels.shape}")
             result["loss"] = F.cross_entropy(
