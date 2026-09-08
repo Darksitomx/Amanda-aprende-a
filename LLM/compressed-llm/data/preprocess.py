@@ -1,27 +1,15 @@
-"""Paso C — Convierte A/B + winner en registros ``context/chosen/rejected`` (§10, §11).
+"""Preprocesado de Arena A/B a registros para SFT y preferencia.
 
-Reglas (§10):
-- ``winner == "model_a"``: chosen = conversation_a, rejected = conversation_b
-- ``winner == "model_b"``: chosen = conversation_b, rejected = conversation_a
-- ``winner == "tie"``    : sin preferencia binaria; se etiqueta como ``is_tie``
-- ``winner == "both_bad"``: se excluye del SFT estándar; se marca ``is_both_bad``
-
-La salida conserva ambas respuestas y metadatos (is_code, is_refusal,
-category_tag, turn, question_id, language).
+El objetivo de SFT debe ser únicamente la última respuesta del asistente,
+condicionada por los mensajes anteriores de la conversación. No se entrena
+contra la representación JSON de la conversación completa.
 """
 from __future__ import annotations
 
 import argparse
-import json
-import os
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from datasets import Dataset
-
-
-def _extract_conversation_text(item: Dict) -> str:
-    """Serializa la conversación a texto plano conservando turnos."""
-    return json.dumps(item, ensure_ascii=False)
 
 
 def _split_messages(item) -> List[Dict]:
@@ -29,26 +17,71 @@ def _split_messages(item) -> List[Dict]:
     if isinstance(item, list):
         return item
     if isinstance(item, dict):
-        # algunos formatos vienen como {role: content} o con 'messages'
-        if "messages" in item:
+        if "messages" in item and isinstance(item["messages"], list):
             return item["messages"]
         return [item]
     return []
 
 
+def _message_content(message: Dict) -> str:
+    """Normaliza el contenido de un mensaje a texto plano."""
+    content = message.get("content", "")
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text", part.get("content", ""))))
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+    return str(content)
+
+
+def _conversation_to_context_and_answer(messages: List[Dict]) -> Optional[Tuple[List[Dict], str]]:
+    """Separa una conversación en contexto previo + última respuesta del asistente."""
+    if not messages:
+        return None
+
+    last_assistant = None
+    for i in range(len(messages) - 1, -1, -1):
+        role = str(messages[i].get("role", "")).lower()
+        if role == "assistant":
+            last_assistant = i
+            break
+
+    if last_assistant is None:
+        return None
+
+    answer = _message_content(messages[last_assistant]).strip()
+    if not answer:
+        return None
+
+    context = messages[:last_assistant]
+    cleaned_context = []
+    for message in context:
+        role = str(message.get("role", "user"))
+        content = _message_content(message)
+        cleaned_context.append({"role": role, "content": content})
+
+    return cleaned_context, answer
+
+
 def preprocess_row(row: Dict) -> Dict | None:
-    """Convierte una fila brute en el esquema interno. Devuelve ``None`` si debe
-    descartarse (p. ej. estructura corrupta)."""
+    """Convierte una fila de Arena al esquema interno de entrenamiento."""
     qid = str(row.get("question_id", ""))
     winner = row.get("winner")
+    if not qid:
+        return None
 
     conv_a = _split_messages(row.get("conversation_a"))
     conv_b = _split_messages(row.get("conversation_b"))
-    text_a = _extract_conversation_text(conv_a)
-    text_b = _extract_conversation_text(conv_b)
+    a_parts = _conversation_to_context_and_answer(conv_a)
+    b_parts = _conversation_to_context_and_answer(conv_b)
+    if a_parts is None or b_parts is None:
+        return None
 
-    if not qid or not text_a or not text_b:
-        return None  # corrupto / incompleto
+    context_a, answer_a = a_parts
+    context_b, answer_b = b_parts
 
     meta = {
         "is_code": bool(row.get("is_code", False)),
@@ -66,49 +99,56 @@ def preprocess_row(row: Dict) -> Dict | None:
         "archived": False,
     }
 
-    # ---- Preferencia binaria + conservar ambos lados (§10) ----
     if winner == "model_a":
-        rec["context"] = conv_a
-        rec["chosen"] = text_a
-        rec["rejected"] = text_b
-        rec["is_tie"] = False
-        rec["is_both_bad"] = False
+        rec.update({
+            "context": context_a,
+            "chosen": answer_a,
+            "rejected": answer_b,
+            "is_tie": False,
+            "is_both_bad": False,
+        })
     elif winner == "model_b":
-        rec["context"] = conv_a
-        rec["chosen"] = text_b
-        rec["rejected"] = text_a
-        rec["is_tie"] = False
-        rec["is_both_bad"] = False
+        rec.update({
+            "context": context_b,
+            "chosen": answer_b,
+            "rejected": answer_a,
+            "is_tie": False,
+            "is_both_bad": False,
+        })
     elif winner == "tie":
-        rec["context"] = conv_a
-        rec["chosen"] = text_a
-        rec["rejected"] = None
-        rec["is_tie"] = True
-        rec["is_both_bad"] = False
+        # Para SFT podemos usar A, pero conservamos la etiqueta de empate.
+        rec.update({
+            "context": context_a,
+            "chosen": answer_a,
+            "rejected": None,
+            "is_tie": True,
+            "is_both_bad": False,
+        })
     elif winner == "both_bad":
-        rec["context"] = conv_a
-        rec["chosen"] = None
-        rec["rejected"] = None
-        rec["is_tie"] = False
-        rec["is_both_bad"] = True
+        rec.update({
+            "context": context_a,
+            "chosen": None,
+            "rejected": None,
+            "is_tie": False,
+            "is_both_bad": True,
+        })
     else:
-        return None  # winner desconocido
+        return None
 
     return rec
 
 
 def preprocess(ds: Dataset) -> Dataset:
-    """Aplica ``preprocess_row`` sobre todas las filas y descarta las corruptas."""
     rows = []
-    for r in ds:
-        p = preprocess_row(r)
-        if p is not None:
-            rows.append(p)
+    for row in ds:
+        processed = preprocess_row(row)
+        if processed is not None:
+            rows.append(processed)
     return Dataset.from_list(rows)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Preprocesa A/B+winner -> chosen/rejected")
+    parser = argparse.ArgumentParser(description="Preprocesa Arena A/B a contexto + respuesta")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
