@@ -1,13 +1,14 @@
 # Compressed LLM - dependencias
-# Dependencias esenciales (ya instaladas en el entorno de desarrollo):
+# Dependencias esenciales:
 torch>=2.0
 numpy>=1.24
 datasets>=2.14
 tokenizers>=0.15
 pyyaml>=6.0
 tqdm>=4.65
+pytest>=8.0
 
-# Opcional / solo cuando se requiera (tokenizer compatible con HF):
+# Opcional / compatible con Hugging Face:
 transformers>=4.30
 
 # Opcional: logging de experimentos
