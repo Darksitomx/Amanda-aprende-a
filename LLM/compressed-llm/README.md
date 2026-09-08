@@ -1,90 +1,84 @@
 # Compressed LLM
 
-LLM desde cero cuyo contexto de entrada se transforma por un **bottleneck de
-representaciones continuas (continuous latents)** antes del decoder LLM
-autoregresivo. Dataset: `lmarena-ai/arena-human-preference-100k` (español).
+LLM desde cero cuyo contexto de entrada se transforma por un **bottleneck de representaciones continuas (continuous latents)** antes del decoder LLM autoregresivo. Dataset: `lmarena-ai/arena-human-preference-100k` (español).
 
-Especificación completa en [`PROJECT_SPEC.md`](PROJECT_SPEC.md) y
-`../LLM/COMPRESSED_LLM_PROJECT.md`.
+Especificación completa en [`PROJECT_SPEC.md`](PROJECT_SPEC.md) y `../COMPRESSED_LLM_PROJECT.md`.
 
 ## Hipótesis
 
-> Una conversación puede representarse con muchos menos vectores continuos que
-> tokens convencionales, conservando la información necesaria para generar
-> respuestas de alta calidad.
+> Una conversación puede representarse con muchos menos vectores continuos que tokens convencionales, conservando la información necesaria para generar respuestas de alta calidad.
 
-## Arquitectura (§4)
+## Arquitectura
 
-```
-contexto -> tokenizer -> encoder ligero -> K continuous latents -> decoder LLM -> respuesta
+```text
+contexto -> BPE -> N tokens -> encoder local -> K latents continuos -> decoder causal -> respuesta
 ```
 
 ## Requisitos
 
 - Python 3.10+
-- PyTorch 2.x (CUDA opcional para aceleración)
-- `datasets`, `tokenizers`, `pyyaml`, `tqdm`, `numpy`
+- PyTorch 2.x (CUDA opcional)
+- `datasets`, `tokenizers`, `pyyaml`, `tqdm`, `pytest`, `numpy`
 
-Instalar con: `pip install -r requirements.txt`
-El entorno actual ya incluye torch 2.10+cu130 (RTX 4050, CUDA disponible).
-
-## Estructura (§36)
-
-```
-compressed-llm/
-  configs/       # configuraciones YAML (base, v0, baseline, 4x..64x)
-  compressed_llm/  # paquete raíz reutilizable (config, utils)
-  data/          # pipeline de datos (download, filter, preprocess, split, inspect)
-  tokenizer/     # wrapper BPE convencional
-  compressor/    # encoder ligero + bottleneck cross-attention
-  model/         # decoder LLM causal + CompressedLLM
-  losses/        # generation, preference, information
-  training/      # trainer SFT, CLI, overfit test
-  evaluation/    # latent_usage, IRS, factual, generation, preference, benchmark
-  inference/     # generación autoregresiva
-  tests/         # tests obligatorios de shapes/gradients (§38)
-  experiments/   # salidas por fase (v0..v3)
-  results/       # métricas, configs, checkpoints, plots
-```
-
-## Importación
-
-Todos los comandos se ejecutan **desde `compressed-llm/`**. Los imports son
-absolutos por paquete (`compressed_llm`, `model`, `compressor`, `tokenizer`,
-`training`, `data`, `evaluation`, `inference`, `losses`).
-
-## Prueba rápida (shapes + gradientes)
+Instalar:
 
 ```bash
-cd compressed-llm
-python -m pytest tests/test_bottleneck.py -q
+pip install -r requirements.txt
 ```
 
-## Overfit test (§40)
+## Entrenamiento en un solo comando
+
+Desde `LLM/compressed-llm/`:
 
 ```bash
-cd compressed-llm
-python -m training.overfit_test --config configs/v0.yaml --examples 32 --steps 300
+python train.py --config v0
 ```
 
-## Pipeline de datos (§49)
+El pipeline hace automáticamente:
+
+```text
+Arena streaming
+  -> Spanish
+  -> preprocess chosen/rejected
+  -> BPE real
+  -> train/valid/test
+  -> pytest
+  -> overfit 32 ejemplos
+  -> V0 256 -> 64 latents
+```
+
+Por defecto procesa hasta 2048 filas Spanish y entrena un BPE de hasta 8192 tokens. El dataset completo NO se materializa durante este flujo.
+
+Opciones útiles:
 
 ```bash
-cd compressed-llm
-python -m data.build_dataset --out-dir data/out
+python train.py --config v0 --rows 512 --overfit-steps 100 --steps 500
+python train.py --config v0 --device cuda
+python train.py --config v0 --clean
 ```
 
-## Entrenamiento SFT
-
-```bash
-cd compressed-llm
-python -m training.train_sft --config configs/v0.yaml \
-    --train data/out/train --valid data/out/valid --out results/v0
-```
+El tokenizer real queda en `tokenizer/tokenizer.json`, los splits en `data/out/` y los resultados en `results/v0/`.
 
 ## Estado
 
-Esqueleto completo implementado (configs, data, tokenizer, compressor, model,
-losses, training, evaluation, inference, tests). Pendiente: tokenizer real,
-build de datos, entrenamiento V0, escalera de compresión y evaluación (§ más
-abajo en `PROJECT_SPEC.md`).
+Implementados:
+
+- tokenizer BPE real
+- pipeline Arena Spanish por streaming
+- chosen/rejected
+- split agrupado por `question_id`
+- compressor local + latent bottleneck
+- decoder causal con posiciones
+- SFT end-to-end
+- checkpoints y reanudación
+- tests de shapes/gradientes
+- overfit gate antes del entrenamiento grande
+- baseline y configuraciones de compresión
+
+Pendiente como fases experimentales:
+
+- entrenamiento V0 real y sus resultados
+- escalera 4x..128x
+- benchmark IRS/factual completo
+- plots de calidad, retención e inferencia
+- contextos 1024+ y compresión jerárquica
