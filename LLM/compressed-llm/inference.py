@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import os
+import re
 import sys
 
 import torch
@@ -17,13 +19,39 @@ from tokenizer.tokenizer import BPETokenizer
 from inference.generate import generate_texts
 
 
-def load_checkpoint(checkpoint_dir: str):
-    checkpoint_path = os.path.join(checkpoint_dir, "checkpoint.pt")
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"No existe el checkpoint: {checkpoint_path}")
+_STEP_RE = re.compile(r"step_(\d+)\.pt$")
+
+
+def resolve_checkpoint(path: str) -> str:
+    """Resuelve un checkpoint explícito o detecta el último step_*.pt."""
+    candidate = os.path.abspath(path)
+
+    if os.path.isfile(candidate):
+        return candidate
+
+    if not os.path.isdir(candidate):
+        raise FileNotFoundError(f"No existe el checkpoint o directorio: {candidate}")
+
+    checkpoints = glob.glob(os.path.join(candidate, "step_*.pt"))
+    if not checkpoints:
+        raise FileNotFoundError(
+            f"No se encontraron checkpoints step_*.pt en: {candidate}"
+        )
+
+    def step_number(checkpoint: str) -> int:
+        match = _STEP_RE.search(os.path.basename(checkpoint))
+        return int(match.group(1)) if match else -1
+
+    return max(checkpoints, key=step_number)
+
+
+def load_checkpoint(path: str):
+    checkpoint_path = resolve_checkpoint(path)
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if "config" not in payload:
         raise KeyError("El checkpoint no contiene la configuración 'config'.")
+    if "model_state" not in payload:
+        raise KeyError("El checkpoint no contiene 'model_state'.")
     cfg = Config.from_dict(payload["config"])
     return checkpoint_path, payload, cfg
 
@@ -45,20 +73,30 @@ def encode(tokenizer, text: str, device: torch.device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Genera texto con un checkpoint de CompressedLLM")
-    parser.add_argument("--checkpoint", default="checkpoints/v0", help="Directorio que contiene checkpoint.pt")
+    parser = argparse.ArgumentParser(
+        description="Genera texto con un checkpoint de CompressedLLM"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default="results/v0",
+        help="Checkpoint .pt o directorio con step_*.pt (por defecto: results/v0)",
+    )
     parser.add_argument("--prompt", default=None, help="Prompt a probar")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--device", default=None, choices=["cpu", "cuda"], help="Dispositivo")
+    parser.add_argument(
+        "--device", default=None, choices=["cpu", "cuda"], help="Dispositivo"
+    )
     args = parser.parse_args()
 
-    checkpoint_dir = os.path.abspath(args.checkpoint)
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"Cargando checkpoint: {checkpoint_dir}")
+    checkpoint_arg = os.path.abspath(args.checkpoint)
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    print(f"Buscando checkpoint en: {checkpoint_arg}")
     print(f"Dispositivo: {device}")
 
-    checkpoint_path, payload, cfg = load_checkpoint(checkpoint_dir)
+    checkpoint_path, payload, cfg = load_checkpoint(checkpoint_arg)
     tokenizer = load_tokenizer(ROOT)
     use_compression = payload.get("use_compression", True)
     model = CompressedLLM(cfg, use_compression=use_compression)
@@ -66,7 +104,7 @@ def main():
     model.to(device)
     model.eval()
 
-    print(f"Checkpoint: {checkpoint_path}")
+    print(f"Checkpoint seleccionado: {checkpoint_path}")
     print(f"Step: {payload.get('step', '?')}")
     print(f"Parámetros: {model.get_num_parameters():,}")
     print(f"Compresión: {'ON' if use_compression else 'OFF'}")
@@ -100,7 +138,10 @@ def run_one(model, tokenizer, prompt, cfg, args, device):
         ratio = 1.0
 
     texts = generate_texts(
-        model, context_ids, context_mask, tokenizer,
+        model,
+        context_ids,
+        context_mask,
+        tokenizer,
         max_new_tokens=args.max_new_tokens,
         bos_token_id=cfg.model.bos_token_id,
         eos_token_id=cfg.model.eos_token_id,
