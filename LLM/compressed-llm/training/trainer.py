@@ -38,12 +38,18 @@ class Trainer:
         self.device = torch.device(device)
         self.model.to(self.device)
 
+        if self.device.type == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.set_float32_matmul_precision("high")
+
         self.use_amp = (t.mixed_precision == "fp16" and self.device.type == "cuda")
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
         self.optimizer = torch.optim.AdamW(
             model.parameters(), lr=t.learning_rate, weight_decay=t.weight_decay
         )
         self.global_step = 0
+        self.last_valid_loss = float("nan")
 
         if resume_from and os.path.exists(resume_from):
             self._resume(resume_from)
@@ -67,8 +73,12 @@ class Trainer:
         total, n = 0.0, 0
         with torch.no_grad():
             for batch in self.valid_loader:
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                out = self.model(**batch)
+                batch = {
+                    k: v.to(self.device, non_blocking=self.device.type == "cuda")
+                    for k, v in batch.items()
+                }
+                with torch.amp.autocast("cuda", enabled=self.use_amp, dtype=torch.float16):
+                    out = self.model(**batch)
                 total += out["loss"].item() * batch["context_ids"].size(0)
                 n += batch["context_ids"].size(0)
         self.model.train()
@@ -89,11 +99,11 @@ class Trainer:
         accum = t.gradient_accumulation
         metrics = []
         iterator = iter(self.train_loader)
-        pbar = tqdm(total=max_steps, initial=self.global_step)
+        pbar = tqdm(total=max_steps, initial=self.global_step, desc="training", unit="step")
         step_lr = lr
 
         while self.global_step < max_steps:
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             accum_loss = 0.0
             for _ in range(accum):
                 try:
@@ -101,9 +111,11 @@ class Trainer:
                 except StopIteration:
                     iterator = iter(self.train_loader)
                     batch = next(iterator)
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                with torch.amp.autocast("cuda", enabled=self.use_amp,
-                                        dtype=torch.float16):
+                batch = {
+                    k: v.to(self.device, non_blocking=self.device.type == "cuda")
+                    for k, v in batch.items()
+                }
+                with torch.amp.autocast("cuda", enabled=self.use_amp, dtype=torch.float16):
                     out = self.model(**batch)
                     loss = out["loss"] / accum
                 self.scaler.scale(loss).backward()
@@ -122,18 +134,23 @@ class Trainer:
             self.scaler.update()
             self.global_step = step
 
+            if step % t.eval_steps == 0 or step == max_steps:
+                self.last_valid_loss = self._valid_loss()
+
             if step % log_steps == 0 or step == max_steps:
-                vloss = self._valid_loss()
+                train_loss = accum_loss / accum
                 rec = {
                     "step": step,
-                    "train_loss": accum_loss / accum,
-                    "valid_loss": vloss,
-                    "perplexity": math.exp(min(accum_loss / accum, 20.0)),
+                    "train_loss": train_loss,
+                    "valid_loss": self.last_valid_loss,
+                    "perplexity": math.exp(min(train_loss, 20.0)),
                     "lr": step_lr,
                 }
                 metrics.append(rec)
-                logger.info("step=%d loss=%.4f ppl=%.2f lr=%.2e",
-                            step, rec["train_loss"], rec["perplexity"], rec["lr"])
+                logger.info("step=%d loss=%.4f val=%.4f ppl=%.2f lr=%.2e",
+                            step, rec["train_loss"], rec["valid_loss"],
+                            rec["perplexity"], rec["lr"])
+                pbar.set_postfix(loss=f"{train_loss:.3f}", val=f"{self.last_valid_loss:.3f}")
 
             if step % save_steps == 0 or step == max_steps:
                 self._save_checkpoint(os.path.join(output_dir, f"step_{step}.pt"), step)
