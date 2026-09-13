@@ -6,6 +6,7 @@ import glob
 import os
 import re
 import sys
+from typing import Optional
 
 import torch
 
@@ -20,6 +21,25 @@ from inference.generate import generate_texts
 
 
 _STEP_RE = re.compile(r"step_(\d+)\.pt$")
+
+
+def detect_latest_checkpoint(results_dir: str = "results") -> Optional[str]:
+    """Devuelve el directorio con el step_*.pt más reciente bajo results/.
+
+    Se usa cuando inference.py se ejecuta sin ``--checkpoint``, de modo que
+    funcione con cualquier config (v0, fast_v1, 16x, ...) sin editar nada.
+    """
+    root = os.path.join(ROOT, results_dir)
+    if not os.path.isdir(root):
+        return None
+    latest: Optional[str] = None
+    latest_mtime = -1.0
+    for entry in os.listdir(root):
+        for checkpoint in glob.glob(os.path.join(root, entry, "step_*.pt")):
+            mtime = os.path.getmtime(checkpoint)
+            if mtime > latest_mtime:
+                latest, latest_mtime = checkpoint, mtime
+    return os.path.dirname(latest) if latest else None
 
 
 def resolve_checkpoint(path: str) -> str:
@@ -78,8 +98,9 @@ def main():
     )
     parser.add_argument(
         "--checkpoint",
-        default="results/v0",
-        help="Checkpoint .pt o directorio con step_*.pt (por defecto: results/v0)",
+        default=None,
+        help="Checkpoint .pt o directorio con step_*.pt "
+             "(por defecto: se auto-detecta el más reciente en results/)",
     )
     parser.add_argument("--prompt", default=None, help="Prompt a probar")
     parser.add_argument("--max-new-tokens", type=int, default=64)
@@ -89,7 +110,18 @@ def main():
     )
     args = parser.parse_args()
 
-    checkpoint_arg = os.path.abspath(args.checkpoint)
+    checkpoint_arg = args.checkpoint
+    if checkpoint_arg is None:
+        detected = detect_latest_checkpoint("results")
+        if detected is None:
+            raise SystemExit(
+                "No se encontraron checkpoints en results/. "
+                "Entrena primero (python train.py --config <cfg>) "
+                "o pasa --checkpoint <ruta>."
+            )
+        checkpoint_arg = detected
+        print(f"Checkpoint auto-detectado: {os.path.abspath(checkpoint_arg)}")
+    checkpoint_arg = os.path.abspath(checkpoint_arg)
     device = torch.device(
         args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
