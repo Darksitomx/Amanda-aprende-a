@@ -10,9 +10,14 @@ env/
 data/*.arrow
 data/*.jsonl
 data/cache/
-results/checkpoints/
-results/plots/
+# Datasets y cachés generados por el pipeline (regenerables con python train.py)
+data/raw/
+data/out/
+# Resultados de entrenamiento (checkpoints pesados y resúmenes de run)
+results/
 experiments/*/checkpoints/
+# Checkpoints de modelos (regenerables; GitHub rechaza > 100 MB)
+*.pt
 
 # PyTorch / HF
 lightning_logs/

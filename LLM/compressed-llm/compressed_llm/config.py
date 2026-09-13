@@ -61,6 +61,9 @@ class TrainingConfig:
     eval_steps: int = 500
     output_dir: str = "results"
     grad_clip: Optional[float] = 1.0
+    num_workers: int = 0
+    pin_memory: bool = True
+    compile_model: bool = False
 
 
 @dataclass

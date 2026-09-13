@@ -62,6 +62,11 @@ class SFTDataset(TorchDataset):
 
 def collate_sft(batch: List[Dict], pad_token_id: int = 0,
                 max_input: int = 256, max_output: int = 256) -> Dict:
+    """Forma lotes con padding dinámico, limitado por los máximos configurados.
+
+    Evita que ejemplos cortos paguen el coste de atención de la longitud máxima
+    del experimento. Las máscaras conservan la semántica original.
+    """
     def pad(seqs, target, value):
         out, masks = [], []
         for seq in seqs:
@@ -75,9 +80,11 @@ def collate_sft(batch: List[Dict], pad_token_id: int = 0,
             masks.append(mask)
         return torch.tensor(out, dtype=torch.long), torch.tensor(masks, dtype=torch.bool)
 
-    context_ids, context_mask = pad([x["context_ids"] for x in batch], max_input, pad_token_id)
-    output_ids, _ = pad([x["output_ids"] for x in batch], max_output, pad_token_id)
-    labels, _ = pad([x["labels"] for x in batch], max_output, -100)
+    input_len = min(max_input, max(len(x["context_ids"]) for x in batch))
+    output_len = min(max_output, max(len(x["output_ids"]) for x in batch))
+    context_ids, context_mask = pad([x["context_ids"] for x in batch], input_len, pad_token_id)
+    output_ids, _ = pad([x["output_ids"] for x in batch], output_len, pad_token_id)
+    labels, _ = pad([x["labels"] for x in batch], output_len, -100)
 
     return {
         "context_ids": context_ids,

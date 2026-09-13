@@ -1,0 +1,38 @@
+# Primera configuración para aprender y medir rápido.
+# Compresión 128 tokens -> 32 latents, conservando un decoder pequeño.
+name: fast_v1
+
+model:
+  hidden_size: 256
+  num_layers: 4
+  num_heads: 4
+  intermediate_size: 768
+  max_position_embeddings: 256
+  dropout: 0.1
+
+compressor:
+  encoder_layers: 1
+  hidden_size: 256
+  num_heads: 4
+  latent_count: 32
+  latent_dim: 256
+  cross_attention_layers: 1
+  local_window: 32
+  dropout: 0.1
+
+training:
+  max_input_tokens: 128
+  max_output_tokens: 128
+  batch_size: 4
+  gradient_accumulation: 8
+  learning_rate: 3e-4
+  warmup_steps: 100
+  max_steps: 3000
+  mixed_precision: bf16
+  num_workers: 2
+  pin_memory: true
+  compile_model: false
+
+loss:
+  preference_weight: 0.0
+  information_weight: 0.0

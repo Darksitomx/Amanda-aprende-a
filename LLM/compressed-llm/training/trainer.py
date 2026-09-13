@@ -26,6 +26,7 @@ class Trainer:
     def __init__(self, model, cfg: Config, train_loader: DataLoader,
                  valid_loader: DataLoader = None, resume_from: str = None,
                  device: str = None):
+        self.raw_model = model
         self.model = model
         self.cfg = cfg
         self.train_loader = train_loader
@@ -38,26 +39,31 @@ class Trainer:
         self.device = torch.device(device)
         self.model.to(self.device)
 
+        self.amp_dtype = torch.bfloat16 if t.mixed_precision == "bf16" else torch.float16
+        self.use_amp = (t.mixed_precision in {"fp16", "bf16"} and self.device.type == "cuda")
+        # BF16 no necesita escalado de gradiente y suele ser más estable que FP16.
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp and self.amp_dtype == torch.float16)
         if self.device.type == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             torch.set_float32_matmul_precision("high")
-
-        self.use_amp = (t.mixed_precision == "fp16" and self.device.type == "cuda")
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
         self.optimizer = torch.optim.AdamW(
-            model.parameters(), lr=t.learning_rate, weight_decay=t.weight_decay
+            self.raw_model.parameters(), lr=t.learning_rate, weight_decay=t.weight_decay
         )
         self.global_step = 0
         self.last_valid_loss = float("nan")
 
         if resume_from and os.path.exists(resume_from):
             self._resume(resume_from)
+        # Compilamos después de cargar para mantener checkpoints portables:
+        # los pesos siempre se guardan con los nombres del modelo original.
+        if t.compile_model and self.device.type == "cuda" and hasattr(torch, "compile"):
+            self.model = torch.compile(self.raw_model)
 
     # ------------------------------------------------------------------ #
     def _resume(self, path: str) -> None:
         payload = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(payload["model_state"])
+        self.raw_model.load_state_dict(payload["model_state"])
         if "optimizer_state" in payload:
             try:
                 self.optimizer.load_state_dict(payload["optimizer_state"])
@@ -77,7 +83,7 @@ class Trainer:
                     k: v.to(self.device, non_blocking=self.device.type == "cuda")
                     for k, v in batch.items()
                 }
-                with torch.amp.autocast("cuda", enabled=self.use_amp, dtype=torch.float16):
+                with torch.amp.autocast("cuda", enabled=self.use_amp, dtype=self.amp_dtype):
                     out = self.model(**batch)
                 total += out["loss"].item() * batch["context_ids"].size(0)
                 n += batch["context_ids"].size(0)
@@ -115,7 +121,8 @@ class Trainer:
                     k: v.to(self.device, non_blocking=self.device.type == "cuda")
                     for k, v in batch.items()
                 }
-                with torch.amp.autocast("cuda", enabled=self.use_amp, dtype=torch.float16):
+                with torch.amp.autocast("cuda", enabled=self.use_amp,
+                                        dtype=self.amp_dtype):
                     out = self.model(**batch)
                     loss = out["loss"] / accum
                 self.scaler.scale(loss).backward()
@@ -165,7 +172,7 @@ class Trainer:
     def _save_checkpoint(self, path: str, step: int) -> None:
         torch.save(
             {
-                "model_state": self.model.state_dict(),
+                "model_state": self.raw_model.state_dict(),
                 "optimizer_state": self.optimizer.state_dict(),
                 "step": step,
                 "config": self.cfg.to_dict(),

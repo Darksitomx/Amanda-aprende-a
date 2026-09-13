@@ -17,6 +17,7 @@ No usa el fallback de IDs crudos para entrenamiento real.
 from __future__ import annotations
 
 import argparse
+from functools import partial
 import json
 import random
 import shutil
@@ -25,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
-from datasets import Dataset, load_dataset
+from datasets import load_dataset
 
 ROOT = Path(__file__).resolve().parent
 DATASET_NAME = "lmarena-ai/arena-human-preference-100k"
@@ -35,18 +36,50 @@ def log(msg: str) -> None:
     print(f"\n{'=' * 72}\n{msg}\n{'=' * 72}", flush=True)
 
 
-def stream_spanish(num_rows: int) -> List[Dict]:
+def stream_spanish(num_rows: int, scan_log_every: int = 5_000) -> List[Dict]:
+    """Descarga en streaming hasta ``num_rows`` filas Spanish, mostrando progreso.
+
+    El dataset no garantiza el idioma por fila, así que se escanean filas hasta
+    reunir ``num_rows`` en español. La barra de ``tqdm`` muestra en vivo las
+    filas escaneadas y las Spanish acumuladas, y cada ``scan_log_every`` filas
+    se imprime una línea en texto plano (útil si el log se redirige a archivo).
+    """
     log(f"[1/7] Descargando hasta {num_rows} filas Spanish de {DATASET_NAME} (streaming)")
+    from tqdm import tqdm
     ds = load_dataset(DATASET_NAME, split="train", streaming=True)
-    ds = ds.filter(lambda ex: ex.get("language") == "Spanish")
     rows: List[Dict] = []
-    for row in ds:
-        rows.append(row)
-        if len(rows) >= num_rows:
-            break
+    scanned = 0
+    try:
+        bar = tqdm(desc=f"Spanish 0/{num_rows}", unit=" filas",
+                   unit_scale=True, mininterval=0.5)
+        for ex in ds:
+            scanned += 1
+            if ex.get("language") == "Spanish":
+                rows.append(ex)
+                bar.set_description(
+                    f"Descarga completa: Spanish {len(rows)}/{num_rows}"
+                    if len(rows) >= num_rows
+                    else f"Spanish {len(rows)}/{num_rows}"
+                )
+                if len(rows) >= num_rows:
+                    break
+            else:
+                bar.set_description(f"Spanish {len(rows)}/{num_rows}")
+            bar.update(1)
+            if scanned % scan_log_every == 0:
+                # Línea en texto plano periódica: visible aunque el log se
+                # redirija a un archivo (tqdm usa retorno de carro).
+                print(f"  ...filas escaneadas: {scanned:,} | "
+                      f"Spanish: {len(rows)}/{num_rows}", flush=True)
+    finally:
+        bar.close()
     if len(rows) < 32:
-        raise RuntimeError(f"Solo se encontraron {len(rows)} filas Spanish; se necesitan al menos 32.")
-    print(f"Muestra obtenida: {len(rows)} filas", flush=True)
+        raise RuntimeError(
+            f"Solo se encontraron {len(rows)} filas Spanish tras escanear "
+            f"{scanned:,} filas; se necesitan al menos 32."
+        )
+    print(f"Muestra obtenida: {len(rows)} filas "
+          f"(se escanearon {scanned:,} filas en total)", flush=True)
     return rows
 
 
@@ -135,9 +168,13 @@ def prepare_data(args, cfg):
     if args.clean and out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Arrow/fsspec presenta errores de escritura en algunas combinaciones de
+    # Windows + Python recientes. JSONL es portable, versionable y el pipeline
+    # principal ya conserva los registros en memoria para entrenar.
     for name, subset in (("train", train_records), ("valid", valid_records), ("test", test_records)):
-        Dataset.from_list(subset).save_to_disk(str(out_dir / name))
-        print(f"{name}: {len(subset)}", flush=True)
+        split_path = out_dir / f"{name}.jsonl"
+        save_jsonl(subset, split_path)
+        print(f"{name}: {len(subset)} -> {split_path.name}", flush=True)
 
     return tok, train_records, valid_records, test_records
 
@@ -160,10 +197,15 @@ def run_overfit(cfg, tok, records: List[Dict], steps: int, device: str | None) -
 
     small = records[:min(32, len(records))]
     ds = SFTDataset(small, tok, cfg.training.max_input_tokens, cfg.training.max_output_tokens)
+    # `partial` en lugar de lambda local: con multiprocessing spawn (Windows)
+    # el collate_fn debe ser picklable, y una lambda local no lo es.
     loader = DataLoader(
         ds, batch_size=cfg.training.batch_size, shuffle=True,
-        collate_fn=lambda b: collate_sft(
-            b, tok.pad_token_id, cfg.training.max_input_tokens, cfg.training.max_output_tokens
+        collate_fn=partial(
+            collate_sft,
+            pad_token_id=tok.pad_token_id,
+            max_input=cfg.training.max_input_tokens,
+            max_output=cfg.training.max_output_tokens,
         ),
     )
     model = CompressedLLM(cfg, use_compression=True)
@@ -202,6 +244,7 @@ def run_overfit(cfg, tok, records: List[Dict], steps: int, device: str | None) -
 
 def train_v0(cfg, tok, train_records, valid_records, out_dir: Path, args) -> None:
     log("[7/7] Entrenamiento V0")
+    import torch
     from torch.utils.data import DataLoader
     from model.compressed_llm import CompressedLLM
     from training.dataset import SFTDataset, collate_sft
@@ -209,11 +252,18 @@ def train_v0(cfg, tok, train_records, valid_records, out_dir: Path, args) -> Non
 
     train_ds = SFTDataset(train_records, tok, cfg.training.max_input_tokens, cfg.training.max_output_tokens)
     valid_ds = SFTDataset(valid_records, tok, cfg.training.max_input_tokens, cfg.training.max_output_tokens)
-    collate = lambda b: collate_sft(
-        b, tok.pad_token_id, cfg.training.max_input_tokens, cfg.training.max_output_tokens
+    # `partial` (picklable) en vez de un lambda local: los workers de DataLoader
+    # con multiprocessing spawn en Windows no pueden serializar lambdas locales.
+    collate = partial(
+        collate_sft,
+        pad_token_id=tok.pad_token_id,
+        max_input=cfg.training.max_input_tokens,
+        max_output=cfg.training.max_output_tokens,
     )
-    train_loader = DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, collate_fn=collate)
-    valid_loader = DataLoader(valid_ds, batch_size=cfg.training.batch_size, shuffle=False, collate_fn=collate)
+    loader_kwargs = {"num_workers": cfg.training.num_workers,
+                     "pin_memory": cfg.training.pin_memory and torch.cuda.is_available()}
+    train_loader = DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, collate_fn=collate, **loader_kwargs)
+    valid_loader = DataLoader(valid_ds, batch_size=cfg.training.batch_size, shuffle=False, collate_fn=collate, **loader_kwargs)
 
     model = CompressedLLM(cfg, use_compression=True)
     print(f"Parámetros: {model.get_num_parameters():,}", flush=True)

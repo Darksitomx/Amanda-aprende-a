@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from compressed_llm.utils import mask_allow_to_attention
+from compressed_llm.utils import causal_mask
 
 
 class BlockwiseWindowAttention(nn.Module):
@@ -35,18 +35,20 @@ class BlockwiseWindowAttention(nn.Module):
         self.qkv = nn.Linear(dim, 3 * dim, bias=False)
         self.out = nn.Linear(dim, dim, bias=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         # x: [B, N, D]
         B, N, D = x.shape
         window = self.window
         pad_len = (window - N % window) % window
         if pad_len:
             x = F.pad(x, (0, 0, 0, pad_len))  # pad en la dimensión de secuencia
+            mask = F.pad(mask, (0, pad_len), value=False)
         B_, N_, D_ = x.shape
         num_blocks = N_ // window
 
         # -> [B, num_blocks, window, D] -> [B*num_blocks, window, D]
         xb = x.view(B_, num_blocks, window, D_).reshape(B_ * num_blocks, window, D_)
+        mb = mask.view(B_, num_blocks, window).reshape(B_ * num_blocks, window)
 
         qkv = self.qkv(xb)  # [B*b, window, 3*D]
         q, k, v = qkv.chunk(3, dim=-1)
@@ -56,17 +58,14 @@ class BlockwiseWindowAttention(nn.Module):
         k = k.view(B_ * num_blocks, window, H, hd).transpose(1, 2)
         v = v.view(B_ * num_blocks, window, H, hd).transpose(1, 2)
 
-        scores = (q @ k.transpose(-1, -2)) / (hd ** 0.5)  # causal-less block
-        # Bloque causal: máscara triangular dentro de cada bloque
-        causal = torch.tril(
-            torch.ones(window, window, device=x.device, dtype=torch.bool)
+        # Bloque causal local y sin claves de padding. SDPA permite usar los
+        # kernels acelerados de PyTorch sin construir scores explícitamente.
+        allow = causal_mask(window, x.device)[None, None, :, :] & mb[:, None, None, :]
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=allow,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False,
         )
-        attn_mask = mask_allow_to_attention(causal)
-        scores = scores + attn_mask
-        attn = torch.softmax(scores, dim=-1)
-        attn = F.dropout(attn, self.dropout, training=self.training)
-
-        out = attn @ v  # [., H, window, hd]
         out = out.transpose(1, 2).contiguous().view(B_ * num_blocks, window, D_)
         out = self.out(out).reshape(B_, num_blocks, window, D_).view(B_, N_, D_)
 
@@ -91,8 +90,8 @@ class EncoderBlock(nn.Module):
         )
         self.dropout = dropout
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + F.dropout(self.attn(self.norm1(x)), self.dropout, training=self.training)
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        x = x + F.dropout(self.attn(self.norm1(x), mask), self.dropout, training=self.training)
         x = x + F.dropout(self.ffn(self.norm2(x)), self.dropout, training=self.training)
         return x
 
@@ -119,7 +118,7 @@ class LightEncoder(nn.Module):
         # x: [B, N, D_in]; mask: [B, N] booleano (1 = real/keep)
         x = self.in_proj(x)
         for block in self.blocks:
-            x = block(x)
+            x = block(x, mask)
         # Enmascarar posiciones de padding tras el encoder
         x = x * mask.unsqueeze(-1).to(x.dtype)
         return x

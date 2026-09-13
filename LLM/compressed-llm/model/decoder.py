@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from compressed_llm.utils import causal_mask, mask_allow_to_attention
+from compressed_llm.utils import causal_mask
 
 
 class CausalMultiHeadAttention(nn.Module):
@@ -28,17 +28,19 @@ class CausalMultiHeadAttention(nn.Module):
         k = k.view(B, S, H, hd).transpose(1, 2)
         v = v.view(B, S, H, hd).transpose(1, 2)
 
-        scores = (q @ k.transpose(-1, -2)) / (hd ** 0.5)
         causal = causal_mask(S, x.device)
-        scores = scores + mask_allow_to_attention(causal).unsqueeze(0).unsqueeze(0)
-
+        allow = causal.unsqueeze(0).unsqueeze(0)
         if key_padding_mask is not None:
-            allow = key_padding_mask.unsqueeze(1).unsqueeze(1)
-            scores = scores + mask_allow_to_attention(allow.expand(B, 1, S, S))
-
-        attn = torch.softmax(scores, dim=-1)
-        attn = F.dropout(attn, self.dropout, training=self.training)
-        out = attn @ v
+            # La máscara se aplica sobre las claves: ningún token puede leer
+            # posiciones de padding, aunque estén dentro de su prefijo causal.
+            allow = allow & key_padding_mask[:, None, None, :]
+        # SDPA selecciona Flash Attention / memory-efficient attention cuando
+        # están disponibles; en CPU conserva una implementación correcta.
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=allow,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False,
+        )
         out = out.transpose(1, 2).contiguous().view(B, S, D)
         return self.out(out)
 
