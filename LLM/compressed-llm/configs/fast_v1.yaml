@@ -32,6 +32,10 @@ training:
   num_workers: 2
   pin_memory: true
   compile_model: false
+  distillation_weight: 0.30
+  full_context_weight: 0.10
+  distillation_temperature: 2.0
+  distillation_steps: 800
 
 loss:
   preference_weight: 0.0

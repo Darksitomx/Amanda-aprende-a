@@ -41,7 +41,11 @@ class CompressedLLM(nn.Module):
 
     def forward(self, context_ids: torch.Tensor, context_mask: torch.Tensor,
                 output_ids: Optional[torch.Tensor] = None,
-                labels: Optional[torch.Tensor] = None) -> dict:
+                labels: Optional[torch.Tensor] = None,
+                teacher_mode: bool = False,
+                distillation_weight: float = 0.0,
+                full_context_weight: float = 0.0,
+                distillation_temperature: float = 2.0) -> dict:
         B = context_ids.size(0)
         if self.use_compression:
             prefix = self.compress_context(context_ids, context_mask)
@@ -57,7 +61,7 @@ class CompressedLLM(nn.Module):
             if labels is not None and output_ids.size(1) != labels.size(1):
                 raise ValueError("output_ids y labels deben tener la misma longitud.")
             seq = torch.cat([prefix, self.tok_emb(output_ids)], dim=1)
-            out_mask = torch.ones(B, output_ids.size(1), dtype=torch.bool, device=context_ids.device)
+            out_mask = output_ids.ne(self.cfg.model.pad_token_id)
             seq_mask = torch.cat([prefix_mask, out_mask], dim=1)
 
         logits = self.decoder(seq, seq_mask)
@@ -73,9 +77,42 @@ class CompressedLLM(nn.Module):
             resp_logits = logits[:, prefix_len:prefix_len + L, :]
             if resp_logits.size(1) != L:
                 raise RuntimeError(f"Alineación inválida: {resp_logits.shape} vs {labels.shape}")
-            result["loss"] = F.cross_entropy(
+            student_loss = F.cross_entropy(
                 resp_logits.reshape(-1, resp_logits.size(-1)), labels.reshape(-1), ignore_index=-100
             )
+            result["loss"] = student_loss
+            result["student_ce"] = student_loss.detach()
+
+            if teacher_mode and (distillation_weight > 0.0 or full_context_weight > 0.0):
+                # Ruta auxiliar temporal: el mismo decoder ve el contexto
+                # completo para enseñar al bottleneck qué información retener.
+                full_prefix = self.tok_emb(context_ids)
+                full_seq = torch.cat([full_prefix, self.tok_emb(output_ids)], dim=1)
+                full_mask = torch.cat([context_mask, out_mask], dim=1)
+                teacher_logits_all = self.decoder(full_seq, full_mask)
+                teacher_prefix_len = context_ids.size(1)
+                teacher_logits = teacher_logits_all[:, teacher_prefix_len:teacher_prefix_len + L, :]
+                valid = labels.ne(-100)
+                valid_count = valid.sum().clamp_min(1)
+
+                if full_context_weight > 0.0:
+                    result["full_context_loss"] = F.cross_entropy(
+                        teacher_logits.reshape(-1, teacher_logits.size(-1)),
+                        labels.reshape(-1), ignore_index=-100,
+                    )
+                    result["loss"] = result["loss"] + full_context_weight * result["full_context_loss"]
+
+                if distillation_weight > 0.0:
+                    temperature = max(float(distillation_temperature), 1e-3)
+                    teacher_probs = F.softmax(teacher_logits.detach() / temperature, dim=-1)
+                    student_log_probs = F.log_softmax(resp_logits / temperature, dim=-1)
+                    token_kl = F.kl_div(
+                        student_log_probs, teacher_probs, reduction="none"
+                    ).sum(dim=-1)
+                    result["distillation_loss"] = (
+                        (token_kl * valid).sum() / valid_count * (temperature ** 2)
+                    )
+                    result["loss"] = result["loss"] + distillation_weight * result["distillation_loss"]
         return result
 
     def get_num_parameters(self) -> int:

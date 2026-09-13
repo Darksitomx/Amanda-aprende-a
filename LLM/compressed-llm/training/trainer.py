@@ -111,6 +111,7 @@ class Trainer:
         while self.global_step < max_steps:
             self.optimizer.zero_grad(set_to_none=True)
             accum_loss = 0.0
+            accum_student_ce = 0.0
             for _ in range(accum):
                 try:
                     batch = next(iterator)
@@ -121,12 +122,23 @@ class Trainer:
                     k: v.to(self.device, non_blocking=self.device.type == "cuda")
                     for k, v in batch.items()
                 }
+                teacher_active = (
+                    t.distillation_steps > self.global_step
+                    and (t.distillation_weight > 0.0 or t.full_context_weight > 0.0)
+                )
                 with torch.amp.autocast("cuda", enabled=self.use_amp,
                                         dtype=self.amp_dtype):
-                    out = self.model(**batch)
+                    out = self.model(
+                        **batch,
+                        teacher_mode=teacher_active,
+                        distillation_weight=t.distillation_weight,
+                        full_context_weight=t.full_context_weight,
+                        distillation_temperature=t.distillation_temperature,
+                    )
                     loss = out["loss"] / accum
                 self.scaler.scale(loss).backward()
                 accum_loss += out["loss"].item()
+                accum_student_ce += out.get("student_ce", out["loss"]).item()
 
             step = self.global_step + 1
             scale = min(1.0, step / max(1, warmup))
@@ -146,18 +158,21 @@ class Trainer:
 
             if step % log_steps == 0 or step == max_steps:
                 train_loss = accum_loss / accum
+                student_ce = accum_student_ce / accum
                 rec = {
                     "step": step,
                     "train_loss": train_loss,
+                    "student_ce": student_ce,
                     "valid_loss": self.last_valid_loss,
                     "perplexity": math.exp(min(train_loss, 20.0)),
                     "lr": step_lr,
                 }
                 metrics.append(rec)
-                logger.info("step=%d loss=%.4f val=%.4f ppl=%.2f lr=%.2e",
-                            step, rec["train_loss"], rec["valid_loss"],
+                logger.info("step=%d loss=%.4f ce=%.4f val=%.4f ppl=%.2f lr=%.2e",
+                            step, rec["train_loss"], rec["student_ce"], rec["valid_loss"],
                             rec["perplexity"], rec["lr"])
-                pbar.set_postfix(loss=f"{train_loss:.3f}", val=f"{self.last_valid_loss:.3f}")
+                pbar.set_postfix(loss=f"{train_loss:.3f}", ce=f"{student_ce:.3f}",
+                                 val=f"{self.last_valid_loss:.3f}")
 
             if step % save_steps == 0 or step == max_steps:
                 self._save_checkpoint(os.path.join(output_dir, f"step_{step}.pt"), step)

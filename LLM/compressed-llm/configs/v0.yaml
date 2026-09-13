@@ -27,7 +27,13 @@ training:
   warmup_steps: 100
   max_steps: 10000
   mixed_precision: fp16
+  distillation_weight: 0.30
+  full_context_weight: 0.10
+  distillation_temperature: 2.0
+  distillation_steps: 1000
 
 loss:
-  preference_weight: 0.1
+  # Las pérdidas auxiliares (losses/preference.py, losses/information.py) aún
+  # NO están cableadas al entrenamiento; mantenerlas a 0.0 hasta implementarlas.
+  preference_weight: 0.0
   information_weight: 0.0

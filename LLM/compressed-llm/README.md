@@ -18,6 +18,8 @@ El menú permite:
 
 El tokenizer BPE se entrena únicamente en la primera etapa y después se reutiliza. Esto es importante porque cambiar el vocabulario cambiaría el tamaño de la matriz de embeddings y no sería compatible con el checkpoint existente.
 
+Durante los primeros steps, `v0` y `fast_v1` usan una destilación temporal: el decoder también consulta el contexto completo como referencia mientras aprende a responder desde los latents. Después de `distillation_steps`, se desactiva esa ruta auxiliar y el entrenamiento continúa únicamente con la entrada comprimida.
+
 ## GPU
 
 El CLI detecta CUDA y propone un micro-batch más alto según la VRAM. En CUDA activa FP16/AMP, transferencias `non_blocking` con `pin_memory` y TF32 cuando corresponde. La acumulación de gradiente mantiene un batch efectivo grande sin exigir toda la memoria de una sola vez.

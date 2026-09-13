@@ -18,11 +18,12 @@ import os
 import random
 import re
 import time
+from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 import torch
-from datasets import Dataset, load_dataset
+from datasets import load_dataset
 from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parent
@@ -188,8 +189,18 @@ def build_splits(records: List[Dict], seed: int):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     train_records, valid_records, test_records = grouped_split(records, seed)
     for name, subset in (("train", train_records), ("valid", valid_records), ("test", test_records)):
-        Dataset.from_list(subset).save_to_disk(str(OUT_DIR / name))
-    print(f"Splits: train={len(train_records)} valid={len(valid_records)} test={len(test_records)}")
+        # JSONL evita el fallo de Arrow/fsspec al escribir en algunas
+        # instalaciones Windows + Python recientes. El CLI entrena con las
+        # listas en memoria, por lo que no se pierde ninguna funcionalidad.
+        split_path = OUT_DIR / f"{name}.jsonl"
+        split_path.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in subset),
+            encoding="utf-8",
+        )
+    print(
+        f"Splits: train={len(train_records)} valid={len(valid_records)} "
+        f"test={len(test_records)} (JSONL)"
+    )
     return train_records, valid_records, test_records
 
 
@@ -246,9 +257,9 @@ def make_loaders(cfg, tok, train_records, valid_records, batch_size: int):
 
     train_ds = SFTDataset(train_records, tok, cfg.training.max_input_tokens, cfg.training.max_output_tokens)
     valid_ds = SFTDataset(valid_records, tok, cfg.training.max_input_tokens, cfg.training.max_output_tokens)
-    collate = lambda b: collate_sft(
-        b, tok.pad_token_id, cfg.training.max_input_tokens, cfg.training.max_output_tokens
-    )
+    collate = partial(collate_sft, pad_token_id=tok.pad_token_id,
+                      max_input=cfg.training.max_input_tokens,
+                      max_output=cfg.training.max_output_tokens)
     pin = torch.cuda.is_available()
     train_loader = DataLoader(
         train_ds,

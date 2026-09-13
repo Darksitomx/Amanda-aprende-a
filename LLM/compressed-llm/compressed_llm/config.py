@@ -64,6 +64,10 @@ class TrainingConfig:
     num_workers: int = 0
     pin_memory: bool = True
     compile_model: bool = False
+    distillation_weight: float = 0.0
+    full_context_weight: float = 0.0
+    distillation_temperature: float = 2.0
+    distillation_steps: int = 0
 
 
 @dataclass
