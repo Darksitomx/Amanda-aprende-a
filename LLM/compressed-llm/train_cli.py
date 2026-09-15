@@ -104,22 +104,30 @@ def fetch_more_rows(target_total: int) -> List[Dict]:
     ds = ds.filter(lambda ex: ex.get("language") == "Spanish")
     ds = ds.skip(current)
 
+    # El objetivo puede superar lo que el dataset realmente contiene (p. ej.
+    # arena-human-preference-100k tiene ~1747 filas Spanish). En ese caso se
+    # escanea hasta agotar el dataset y se usan todas las filas disponibles en
+    # lugar de abortar el entrenamiento.
     new_rows: List[Dict] = []
     for row in ds:
         new_rows.append(row)
-        print(f"  filas: {current + len(new_rows)}/{target_total}", end="\r", flush=True)
+        print(f"  filas: {current + len(new_rows):,}/{target_total:,}", end="\r", flush=True)
         if len(new_rows) >= needed:
             break
     print()
 
     if len(new_rows) < needed:
-        raise RuntimeError(
-            f"El dataset solo permitió obtener {len(new_rows)} filas nuevas; "
-            f"objetivo pendiente: {needed}."
+        total_available = current + len(new_rows)
+        print(
+            f"AVISO: el dataset solo tiene ~{total_available:,} filas Spanish en "
+            f"total; se usan las {total_available:,} disponibles "
+            f"(objetivo pedido: {target_total:,})."
         )
+        if not new_rows:
+            return load_jsonl(RAW_PATH)
 
     append_jsonl(new_rows, RAW_PATH)
-    print(f"Dataset local: {count_jsonl(RAW_PATH)} filas Spanish.")
+    print(f"Dataset local: {count_jsonl(RAW_PATH):,} filas Spanish.")
     return load_jsonl(RAW_PATH)
 
 
