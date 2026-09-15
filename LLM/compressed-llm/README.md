@@ -2,9 +2,43 @@
 
 Implementación del experimento **Compressed LLM**: `tokens -> encoder ligero -> K continuous latents -> decoder LLM autoregresivo`.
 
-## Entrenamiento por etapas
+## CLI definitivo (`cli.py`)
 
-Para entrenar de forma incremental usa:
+`cli.py` es el punto de entrada recomendado para todo el ciclo de vida de un
+experimento: entrenar desde cero, continuar entrenamiento, hacer crecer el
+modelo a una arquitectura más grande reusando pesos, e inferencia. Cada
+experimento vive en `results/<experiment>/` con su propio checkpoint,
+`metrics.json` (historial completo) y `config_resolved.json`.
+
+```bash
+# Entrenar desde cero
+python cli.py train --experiment v0 --config v0 --rows 3000 --steps 5000
+
+# Continuar entrenando (mismo tamaño), opcionalmente con más datos
+python cli.py continue --experiment v0 --steps 5000
+python cli.py continue --experiment v0 --steps 3000 --rows 8000
+
+# Hacer crecer v0 a una arquitectura más grande (configs/v1.yaml), reusando
+# los pesos ya entrenados en vez de reiniciar, y seguir entrenando 4000 steps
+python cli.py grow --experiment v0 --to v1 --config v1 --steps 4000
+
+# Inferencia / chat
+python cli.py infer --experiment v1
+
+# Ver el estado de todos los experimentos (steps, loss, params, compresión)
+python cli.py status
+```
+
+Sin argumentos abre un menú interactivo equivalente. El dataset
+(`data/out/*.jsonl`) y el tokenizer (`tokenizer/tokenizer.json`) son globales
+y compartidos entre experimentos, para que `grow` pueda transplantar pesos
+sin invalidar los embeddings.
+
+## Entrenamiento por etapas (script anterior, todavía funcional)
+
+`train_cli.py` sigue disponible pero solo administra un único experimento
+hardcodeado (`results/v0`) y no soporta `grow`. Se mantiene por compatibilidad;
+para proyectos nuevos usa `cli.py`.
 
 ```bash
 python train_cli.py

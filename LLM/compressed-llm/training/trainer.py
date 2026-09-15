@@ -103,7 +103,16 @@ class Trainer:
         warmup = t.warmup_steps
         lr = t.learning_rate
         accum = t.gradient_accumulation
-        metrics = []
+        metrics_path = os.path.join(output_dir, "metrics.json")
+        if os.path.exists(metrics_path):
+            # Preservar el historial de steps anteriores: sin esto, cada
+            # llamada a train() (p. ej. al continuar entrenamiento desde un
+            # checkpoint) pisaba metrics.json y se perdían las métricas de
+            # etapas previas.
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                metrics = json.load(f)
+        else:
+            metrics = []
         iterator = iter(self.train_loader)
         pbar = tqdm(total=max_steps, initial=self.global_step, desc="training", unit="step")
         step_lr = lr
@@ -179,8 +188,7 @@ class Trainer:
             pbar.update(1)
 
         pbar.close()
-        with open(os.path.join(output_dir, "metrics.json"), "w",
-                  encoding="utf-8") as f:
+        with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
         return {"metrics": metrics, "final_step": self.global_step}
 
